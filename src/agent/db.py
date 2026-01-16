@@ -32,4 +32,37 @@ CREATE TABLE IF NOT EXISTS feelings_log(
     notes TEXT
 )
 """)
+
+conn.execute("""
+CREATE TABLE IF NOT EXISTS glucose_log(
+    log_id TEXT PRIMARY KEY,
+    user_id TEXT,
+    timestamp TEXT,
+    glucose_level FLOAT,
+    context TEXT,
+    notes TEXT
+)
+""")
+
+conn.execute("""
+CREATE TABLE IF NOT EXISTS sleep_log_entries(
+    log_id TEXT PRIMARY KEY,
+    user_id TEXT,
+    timestamp TEXT,
+    duration_hours FLOAT,
+    quality_score INTEGER,
+    notes TEXT
+)
+""")
+
+conn.execute("""
+CREATE TABLE IF NOT EXISTS exercise_log_entries(
+    log_id TEXT PRIMARY KEY,
+    user_id TEXT,
+    exercise_type TEXT,
+    duration_minutes FLOAT,
+    intensity TEXT,
+    notes TEXT
+)
+""")
 conn.commit()

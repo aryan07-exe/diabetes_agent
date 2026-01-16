@@ -8,4 +8,7 @@ class DietState(TypedDict):
     result: str| None
     meal_feedback: str| None
     current_feeling: Optional[dict]
+    sleep_duration: Optional[dict]
+    glucose_level: Optional[dict]
+    exercise: Optional[dict]
     messages: list 

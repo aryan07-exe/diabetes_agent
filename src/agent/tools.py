@@ -9,8 +9,6 @@ def save_food(user_id:str, foods:list, source_text:str):
     """
     Save extracted food items with macros into the long-term food_log database.
     """
-     
-
     for food in foods:
         conn.execute("""
             INSERT INTO food_log VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
@@ -47,4 +45,55 @@ def save_feeling(user_id:str, feeling_type:str, intensity:int, notes:str):
     ))
     conn.commit()
     return "feeling_saved"
+
+def save_glucose(user_id:str, glucose_level:float, context:str, notes:str):
+    """
+    Save glucose level to the database.
+    """
+    conn.execute("""
+        INSERT INTO glucose_log VALUES(?,?,datetime('now'),?,?,?)
+    """, (
+        str(uuid4()),
+        user_id,
+        glucose_level,
+        context,
+        notes
+    ))
+    conn.commit()
+    return "glucose_saved"
+
+def save_sleep(user_id:str, duration_hours:float, quality_score:int, notes:str):
+    """
+    Save sleep record to the database.
+    """
+    conn.execute("""
+        INSERT INTO sleep_log_entries VALUES(?,?,datetime('now'),?,?,?)
+    """, (
+        str(uuid4()),
+        user_id,
+        duration_hours,
+        quality_score,
+        notes
+    ))
+    conn.commit()
+    return "sleep_saved"
+
+def save_exercise(user_id:str, exercise_type:str, duration_minutes:float, intensity:str, notes:str):
+    """
+    Save exercise record to the database.
+    """
+    conn.execute("""
+        INSERT INTO exercise_log_entries VALUES(?,?,?,?,?,?)
+    """, (
+        str(uuid4()),
+        user_id,
+        exercise_type,
+        duration_minutes,
+        intensity,
+        notes
+    ))
+    conn.commit()
+    return "exercise_saved"
+
+
 
