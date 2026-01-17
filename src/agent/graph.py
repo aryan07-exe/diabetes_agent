@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import datetime
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
 from agent.state import DietState
@@ -8,6 +9,7 @@ from agent.db import conn
 from agent.models import FoodExtraction
 from langchain_ollama import ChatOllama
 from langchain_groq import ChatGroq
+from agent.tools import save_water
 
 llm = ChatGroq(
     model="qwen/qwen3-32b",
@@ -34,6 +36,7 @@ Extract food items from the text.
 Estimate macros (calories, protein, carbs, fat, fiber) if not explicitly provided.
 Convert relative times (like "breakfast", "last night") to strict ISO 8601 timestamps (YYYY-MM-DD HH:MM:SS).
 If no time is specified, use the current time.
+Todays Date: {datetime.now().strftime('%Y-%m-%d')}
 
 Text:
 {state["raw_input"]}
@@ -64,6 +67,7 @@ Classify this message into ONE category:
 - log_sleep
 - log_exercise
 - general_health
+- log_water
 
 Message: {state["raw_input"]}
 
@@ -93,6 +97,9 @@ def route_decision(state: DietState):
         return "sleep"
     if state["intent"] == "log_exercise":
         return "exercise"
+    if state["intent"] == "log_water":
+        return "water"
+    
     return "advice"
 
 def advice_node(state: DietState):
@@ -144,6 +151,8 @@ glucose_log(
 
 User question:
 "{state["raw_input"]}"
+
+Current Date: {datetime.now().strftime('%Y-%m-%d')}
 
 Rules:
 - Output ONE valid SQLite SELECT statement
@@ -234,28 +243,29 @@ def feeling_node(state: DietState):
     Extract the following from the user's text:
     1. Main symptom/feeling (e.g., "dizzy", "anxious", "pain").
     2. Intensity (1-10 scale), estimate if not stated (mild=3, severe=8).
-
+    3. Date: Strict ISO 8601 date (YYYY-MM-DD). If "today" or "now", use current date: {datetime.now().strftime('%Y-%m-%d')}. If "yesterday", calculate based on this date.
+    
     User Text: "{state["raw_input"]}"
     
-    Return JSON only: {{ "feeling_type": "...", "intensity": 5 }}
+    Return JSON only: {{ "feeling_type": "...", "intensity": 5, "date": "YYYY-MM-DD" }}
     """
-    structured_llm = llm.with_structured_output(dict) # Simplification: asking for dict directly or via JSON 
-    extraction = llm.invoke(prompt).content
+    res = llm.invoke(prompt).content
     
     # Simple cleanup to parse JSON if needed, or use robust extraction
     # For now, we assume LLM behaves or we use a regex (safer to use a Pydantic model usually, but keeping it simple as per style)
     import json
     try:
-        data = json.loads(re.search(r"\{.*\}", extraction, re.DOTALL).group())
+        data = json.loads(re.search(r"\{.*\}", res, re.DOTALL).group())
     except:
-        data = {"feeling_type": "general", "intensity": 5}
+        data = {"feeling_type": "general", "intensity": 5, "date": "unknown"}
 
     # 2. Save
     save_feeling(
         user_id=state["user_id"],
         feeling_type=data.get("feeling_type", "unknown"),
         intensity=data.get("intensity", 5),
-        notes=state["raw_input"]
+        notes=state["raw_input"],
+        date=data.get("date", "unknown")
     )
 
     # 3. Give immediate context-aware feedback
@@ -266,7 +276,6 @@ def feeling_node(state: DietState):
     3. Be calm and supportive.
     """
     advice = llm.invoke(analysis_prompt).content
-    advice = llm.invoke(analysis_prompt).content
     return {"result": advice}
 
 def glucose_node(state: DietState):
@@ -276,24 +285,26 @@ def glucose_node(state: DietState):
     Extract the following from the user's text:
     1. Glucose Level (float).
     2. Context (e.g., "fasting", "post-meal", "bedtime").
+    3. Date: Strict ISO 8601 date (YYYY-MM-DD). If "today" or "now", use current date: {datetime.now().strftime('%Y-%m-%d')}. If "yesterday", calculate based on this date.
     
     User Text: "{state["raw_input"]}"
     
-    Return JSON only: {{ "glucose_level": 120, "context": "fasting" }}
+    Return JSON only: {{ "glucose_level": 120, "context": "fasting", "date": "YYYY-MM-DD" }}
     """
     res = llm.invoke(prompt).content
     
     try:
         data = json.loads(re.search(r"\{.*\}", res, re.DOTALL).group())
     except:
-        data = {"glucose_level": 0.0, "context": "unknown"}
+        data = {"glucose_level": 0.0, "context": "unknown", "date": "unknown"}
 
     # 2. Save to DB
     save_glucose(
         user_id=state["user_id"],
         glucose_level=data.get("glucose_level", 0.0),
         context=data.get("context", "unknown"),
-        notes=state["raw_input"]
+        notes=state["raw_input"],
+        date=data.get("date", "unknown")
     )
 
     # 3. Provide Advice
@@ -311,12 +322,13 @@ def sleep_node(state: DietState):
     You are a medical scribe.
     Extract the following from the user's text:
     1. Sleep Duration in hours (float).
-    2. Quality Score (1-10 scale). Estimate if not stated (poor=3, normal=5, good=8).
-    3. Notes (context like "interrupted", "napped").
+    2. Date: Strict ISO 8601 date (YYYY-MM-DD). If "today" or "now", use current date: {datetime.now().strftime('%Y-%m-%d')}. If "yesterday", calculate based on this date.
+    3. Quality Score (1-10 scale). Estimate if not stated (poor=3, normal=5, good=8).
+    4. Notes (context like "interrupted", "napped").
 
     User Text: "{state["raw_input"]}"
 
-    Return JSON only: {{ "duration_hours": 7.5, "quality_score": 7, "notes": "..." }}
+    Return JSON only: {{ "duration_hours": 7.5, "date": "YYYY-MM-DD", "quality_score": 7, "notes": "..." }}
     """
     
     res = llm.invoke(prompt).content
@@ -324,20 +336,22 @@ def sleep_node(state: DietState):
     try:
         data = json.loads(re.search(r"\{.*\}", res, re.DOTALL).group())
     except:
-        data = {"duration_hours": 0.0, "quality_score": 5, "notes": "unknown"}
+        data = {"duration_hours": 0.0, "date": "unknown", "quality_score": 5, "notes": "unknown"}
 
     # 2. Save to DB
     save_sleep(
         user_id=state["user_id"],
         duration_hours=data.get("duration_hours", 0.0),
         quality_score=data.get("quality_score", 5),
-        notes=data.get("notes", "unknown")
+        notes=data.get("notes", "unknown"),
+        date=data.get("date", "unknown")
     )
 
     # 3. Provide Advice
     analysis_prompt = f"""
     You are a Diabetes Coach. The user reported sleep:
     Duration: {data.get("duration_hours")} hrs
+    Date: {data.get("date")}
     Quality: {data.get("quality_score")}/10
     Notes: {data.get("notes")}
     
@@ -356,12 +370,14 @@ def exercise_node(state: DietState):
     1. **exercise_type**: e.g. "Walking", "Lifting", "Yoga".
     2. **duration_minutes**: (float). Convert hours to minutes (e.g. "1 hr" -> 60). If not specified, estimate reasonable default (e.g. 30).
     3. **intensity**: "Low", "Medium", "High". Infer from context (e.g. "sprinted" -> High, "stroll" -> Low). Default to "Medium".
-    4. **notes**: Any other details.
+    4. **calories**: Calculate the calories based on the activity given and the intensity.
+    5. **date**: Strict ISO 8601 date (YYYY-MM-DD). If "today" or "now", use current date: {datetime.now().strftime('%Y-%m-%d')}. If "yesterday", calculate based on this date.
+    6. **notes**: Any other details.
     
     User Input: "{state["raw_input"]}"
     
     Return strict JSON ONLY. No markdown, no explanations.
-    Example: {{ "exercise_type": "Running", "duration_minutes": 45, "intensity": "High", "notes": "felt good" }}
+    Example: {{ "exercise_type": "Running", "duration_minutes": 45, "intensity": "High", "calories": 200, "date": "YYYY-MM-DD", "notes": "felt good" }}
     """
     res = llm.invoke(prompt).content
 
@@ -370,7 +386,7 @@ def exercise_node(state: DietState):
         json_str = re.search(r"\{.*\}", res, re.DOTALL).group()
         data = json.loads(json_str)
     except:
-        data = {"exercise_type": "General", "duration_minutes": 30.0, "intensity": "Medium", "notes": "unknown"}
+        data = {"exercise_type": "General", "duration_minutes": 30.0, "intensity": "Medium", "calories": 200, "date": "unknown", "notes": "unknown"}
 
     # 2. Save
     save_exercise(
@@ -378,15 +394,18 @@ def exercise_node(state: DietState):
         exercise_type=data.get("exercise_type", "General"),
         duration_minutes=data.get("duration_minutes", 30.0),
         intensity=data.get("intensity", "Medium"),
-        notes=data.get("notes", "unknown")
+        calories=data.get("calories", 200.0),
+        notes=data.get("notes", "unknown"),
+        date=data.get("date", "unknown")
     )
 
     # 3. Advice
     analysis_prompt = f"""
     You are a Diabetes Coach. User activity:
     {data.get("exercise_type")} for {data.get("duration_minutes")} mins ({data.get("intensity")} intensity).
+    calories burned: {data.get("calories")}
     
-    1. Acknowledge the activity.
+    1. Acknowledge the activity.Explain about the calories burned.
     2. Explain ONE benefit of this specific exercise for blood glucose control.
     3. Keep it short and encouraging.
     """
@@ -394,7 +413,55 @@ def exercise_node(state: DietState):
     return {"result": advice}
 
 ############# WorkFlow#####################
+def water_node(state: DietState):
+    # 1. Extract water details
+    prompt = f"""
+    You are a hydration log assistant. 
+    Extract the following water details from the user's input:
+    
+    1. **quantity**: e.g. "8 glasses", "1 liter".
+    2. **date**: strict ISO 8601 date (YYYY-MM-DD). If "today" or "now", use the current date: {datetime.now().strftime('%Y-%m-%d')}. If "yesterday", calculate based on this date.
+    3. **action**: "add" or "update". 
+       - Use "add" (default) if the user is logging MORE water (e.g., "drank another glass", "2 more cups").
+       - Use "update" if the user is correcting or setting the TOTAL value for the day (e.g., "actually I drank 3 liters yesterday", "update yesterday to 2 liters").
+    4. **notes**: Any other details.
+    
+    User Input: "{state["raw_input"]}"
+    
+    Return strict JSON ONLY. No markdown, no explanations.
+    Example: {{ "quantity": "8 glasses", "date": "YYYY-MM-DD", "action": "add", "notes": "good habit" }}
+    """
+    res = llm.invoke(prompt).content
 
+    try:
+        # Robust JSON extraction
+        json_str = re.search(r"\{.*\}", res, re.DOTALL).group()
+        data = json.loads(json_str)
+    except:
+        data = {"quantity": "unknown", "date": "unknown", "action": "add", "notes": "unknown"}
+
+    # 2. Save
+    save_water(
+        user_id=state["user_id"],
+        quantity=data.get("quantity", "unknown"),
+        date=data.get("date", "unknown"),
+        notes=data.get("notes", "unknown"),
+        action=data.get("action", "add")
+    )
+
+    # 3. Advice
+    analysis_prompt = f"""
+    You are a Diabetes Coach. User reported water intake:
+    {data.get("quantity")} on {data.get("date")} ({data.get("notes")}).
+    Action: {data.get("action")}
+    
+    1. Acknowledge the hydration.
+    2. Explain ONE benefit of hydration for metabolic health.
+    3. Keep it short and encouraging.
+    """
+    advice = llm.invoke(analysis_prompt).content
+    return {"result": advice}
+    
 
 builder = StateGraph(DietState)
 
@@ -408,7 +475,7 @@ builder.add_node("feeling", feeling_node)
 builder.add_node("glucose", glucose_node)
 builder.add_node("sleep", sleep_node)
 builder.add_node("exercise", exercise_node)
-
+builder.add_node("water", water_node)
 builder.add_edge(START, "router")
 builder.add_conditional_edges("router",route_decision)
 
@@ -421,4 +488,5 @@ builder.add_edge("feeling", END)
 builder.add_edge("glucose", END)
 builder.add_edge("sleep", END)
 builder.add_edge("exercise", END)
+builder.add_edge("water", END)
 graph = builder.compile()

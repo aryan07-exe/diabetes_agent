@@ -11,4 +11,5 @@ class DietState(TypedDict):
     sleep_duration: Optional[dict]
     glucose_level: Optional[dict]
     exercise: Optional[dict]
+    water_quantity: Optional[dict]
     messages: list 
