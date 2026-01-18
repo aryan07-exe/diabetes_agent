@@ -6,13 +6,15 @@ from langgraph.prebuilt import ToolNode
 from agent.state import DietState
 from agent.tools import save_food, save_feeling, save_glucose, save_sleep, save_exercise
 from agent.db import conn
-from agent.models import FoodExtraction
+from langgraph.types import Command, interrupt
+from langgraph.checkpoint.memory import MemorySaver
+from agent.models import FoodExtraction, RouteDecision
 from langchain_ollama import ChatOllama
 from langchain_groq import ChatGroq
 from agent.tools import save_water
 
 llm = ChatGroq(
-    model="qwen/qwen3-32b",
+    model="openai/gpt-oss-safeguard-20b",
     temperature=0,
     max_tokens=None,
     reasoning_format="parsed",
@@ -55,52 +57,93 @@ def save_node(state: DietState):
         foods=state["extracted_foods"],
         source_text=state["raw_input"],
     )
-    return {}
+    return {"logs": ["Food items saved to database."]}
 
 def route_node(state: DietState):
     prompt = f"""
-Classify this message into ONE category:
-- log_food
-- ask_history
-- log_feeling
-- log_glucose
-- log_sleep
-- log_exercise
-- general_health
-- log_water
+    You are an intent classifier for a health assistant.
+    Classify the following message into ONE OR MORE of these categories.
 
-Message: {state["raw_input"]}
+    CATEGORIES:
+    1. **log_food**: User is stating what they ate/drank.
+    2. **log_glucose**: User is reporting blood glucose levels.
+    3. **log_feeling**: User is reporting mood, energy, stress.
+    4. **log_sleep**: User is reporting sleep duration or quality.
+    5. **log_exercise**: User is reporting physical activity.
+    6. **log_water**: User is reporting water intake.
+    7. **ask_history**: User is asking about PAST data.
+    8. **general_health**: User is asking a question/seeking advice.
 
-Return only the category name.
-"""
-    res = llm.invoke(prompt)
-    intent = res.content.strip().lower()
+    Message: "{state["raw_input"]}"
+    """
+    structured_llm = llm.with_structured_output(RouteDecision)
+    res = structured_llm.invoke(prompt)
+    
+    intents = res.intents if res and res.intents else ["general_health"]
 
-    return {
-        "intent": intent,
-        "user_id": state["user_id"],
-        "raw_input": state["raw_input"],
-        "messages": state.get("messages", [])
+    return Command(
+        update={
+            "intent": intents,
+            "logs": ["CLEAR"] # Clear logs for the new turn
+        },
+        goto="check_clarity"
+    )
+
+def check_clarity(state: DietState):
+    intents = state["intent"]
+    
+    prompt = f"""
+    You are a clarifying assistant. 
+    User Input: "{state["raw_input"]}"
+    Detected Intents: {intents}
+    
+    Check if the input matches specific requirements:
+    - log_food: Food name required.
+    - log_glucose: Value (mg/dL) required.
+    - log_sleep: Duration or start/end time.
+    - log_exercise: Exercise type and duration.
+    - log_water: Quantity.
+    - log_feeling: Symptom or mood.
+    
+    If ambiguous or missing critical details, return a clarifying question.
+    If clear, return "CLEAR" (and nothing else).
+    """
+    res = llm.invoke(prompt).content.strip()
+    
+    if "CLEAR" not in res.upper():
+        # Interrupt execution to ask user
+        clarification = interrupt(res)
+        # Update raw_input with the new info and restart routing
+        return Command(
+            update={"raw_input": f"{state['raw_input']} {clarification}"},
+            goto="router"
+        )
+
+    # Dispatch Logic (Fan-Out)
+    mapping = {
+        "log_food": "food_flow",
+        "log_glucose": "glucose",
+        "log_sleep": "sleep",
+        "log_exercise": "exercise",
+        "log_water": "water",
+        "log_feeling": "feeling",
+        "ask_history": "query",
+        "general_health": "advice"
     }
 
-
-def route_decision(state: DietState):
-    if state["intent"] == "log_food":
-        return "extract"
-    if state["intent"] == "ask_history":
-        return "query"
-    if state["intent"] == "log_feeling":
-        return "feeling"
-    if state["intent"] == "log_glucose":
-        return "glucose"
-    if state["intent"] == "log_sleep":
-        return "sleep"
-    if state["intent"] == "log_exercise":
-        return "exercise"
-    if state["intent"] == "log_water":
-        return "water"
+    destinations = []
+    for i in intents:
+        if i in mapping:
+            destinations.append(mapping[i])
     
-    return "advice"
+    destinations = list(set(destinations))
+    if not destinations:
+        destinations = ["advice"]
+
+    return Command(goto=destinations)
+
+
+
 
 def advice_node(state: DietState):
     prompt =f"""
@@ -228,13 +271,14 @@ Give short, supportive feedback:
 1) Was this meal good or risky for blood sugar?
 2) What was good?
 3) What could be improved next time?
+4) Give a score out of 10.
 
 Do not mention databases or macros explicitly.Untill asked specifically
 
 """
 
     res = llm.invoke(prompt)
-    return {"meal_feedback": res.content}
+    return {"meal_feedback": res.content, "logs": [f"Meal Analysis: {res.content}"]}
 
 def feeling_node(state: DietState):
     # 1. Extract feeling details
@@ -276,7 +320,7 @@ def feeling_node(state: DietState):
     3. Be calm and supportive.
     """
     advice = llm.invoke(analysis_prompt).content
-    return {"result": advice}
+    return {"logs": [f"Feeling Log: {advice}"]}
 
 def glucose_node(state: DietState):
     # 1. Extract details from text
@@ -314,7 +358,7 @@ def glucose_node(state: DietState):
     2. Suggest a safe immediate action or positive reinforcement.
     """
     advice = llm.invoke(analysis_prompt).content
-    return {"result": advice}
+    return {"logs": [f"Glucose Log: {advice}"]}
 
 def sleep_node(state: DietState):
     # 1. Extract sleep details
@@ -359,7 +403,7 @@ def sleep_node(state: DietState):
     2. Suggest a quick meaningful tip.
     """
     advice = llm.invoke(analysis_prompt).content
-    return {"result": advice}
+    return {"logs": [f"Sleep Log: {advice}"]}
 
 def exercise_node(state: DietState):
     # 1. Extract exercise details
@@ -410,7 +454,7 @@ def exercise_node(state: DietState):
     3. Keep it short and encouraging.
     """
     advice = llm.invoke(analysis_prompt).content
-    return {"result": advice}
+    return {"logs": [f"Exercise Log: {advice}"]}
 
 ############# WorkFlow#####################
 def water_node(state: DietState):
@@ -460,33 +504,71 @@ def water_node(state: DietState):
     3. Keep it short and encouraging.
     """
     advice = llm.invoke(analysis_prompt).content
-    return {"result": advice}
-    
+    return {"logs": [f"Water Log: {advice}"]}
 
+def aggregator_node(state: DietState):
+    logs = state.get("logs", [])
+    if not logs:
+        return {"result": "I processed your request but have no specific feedback."}
+    
+    prompt = f"""
+    You are a helpful monitoring assistant.
+    The user's input has been processed by multiple specialized agents.
+    
+    Agent Reports:
+    {json.dumps(logs, indent=2)}
+    
+    Task:
+    - Synthesize these reports into a SINGLE friendly response.
+    - Confirm what was logged.
+    - Give a cohesive health tip based on the COMBINED data (e.g. sleep + food).
+    """
+    res = llm.invoke(prompt).content
+    return {"result": res}
+
+# --- SubGraph for Food Processing ---
+food_builder = StateGraph(DietState)
+food_builder.add_node("extract", extract_foods)
+food_builder.add_node("evaluate", evaluate_meal_node)
+food_builder.add_node("save", save_node)
+
+food_builder.add_edge(START, "extract")
+food_builder.add_edge("extract", "evaluate")
+food_builder.add_edge("evaluate", "save")
+food_builder.add_edge("save", END)
+
+food_graph = food_builder.compile()
+
+# --- Main Graph ---
 builder = StateGraph(DietState)
 
-builder.add_node("extract", extract_foods)
-builder.add_node("save", save_node)
+# Add the compiled food subgraph as a single node
+builder.add_node("food_flow", food_graph)
+builder.add_node("check_clarity", check_clarity)
+
 builder.add_node("router", route_node)
 builder.add_node("query", query_node) 
 builder.add_node("advice", advice_node)
-builder.add_node("evaluate",evaluate_meal_node)
 builder.add_node("feeling", feeling_node)
 builder.add_node("glucose", glucose_node)
 builder.add_node("sleep", sleep_node)
 builder.add_node("exercise", exercise_node)
 builder.add_node("water", water_node)
-builder.add_edge(START, "router")
-builder.add_conditional_edges("router",route_decision)
+builder.add_node("aggregator", aggregator_node)
 
-builder.add_edge("extract", "evaluate")
-builder.add_edge("evaluate", "save")
-builder.add_edge("save", END)
-builder.add_edge("query", END)
-builder.add_edge("advice", END)
-builder.add_edge("feeling", END)
-builder.add_edge("glucose", END)
-builder.add_edge("sleep", END)
-builder.add_edge("exercise", END)
-builder.add_edge("water", END)
-graph = builder.compile()
+builder.add_edge(START, "router")
+
+# Fan-In: All paths lead to aggregator
+builder.add_edge("food_flow", "aggregator")
+builder.add_edge("query", "aggregator")
+builder.add_edge("advice", "aggregator")
+builder.add_edge("feeling", "aggregator")
+builder.add_edge("glucose", "aggregator")
+builder.add_edge("sleep", "aggregator")
+builder.add_edge("exercise", "aggregator")
+builder.add_edge("water", "aggregator")
+
+builder.add_edge("aggregator", END)
+
+checkpointer = MemorySaver()
+graph = builder.compile(checkpointer=checkpointer)

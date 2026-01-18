@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 class FoodItem(BaseModel):
     meal_time: Optional[str] = Field(description="Time of the meal. Use ISO 8601 format (YYYY-MM-DD HH:MM:SS) if specific time is known, otherwise today's date with estimated time.")
@@ -14,3 +14,8 @@ class FoodItem(BaseModel):
 
 class FoodExtraction(BaseModel):
     foods: List[FoodItem]
+
+class RouteDecision(BaseModel):
+    intents: List[Literal['log_food', 'ask_history', 'log_feeling', 'log_glucose',
+     'log_sleep', 'log_exercise', 'general_health', 
+     'log_water']] = Field(description="List of all relevant categories for the user's input")
